@@ -21,7 +21,7 @@ TOKEN = os.environ.get('RECEITA_TOKEN', 'YggdBLfdninEJX9')
 BASE = os.environ.get('RECEITA_URL', 'https://arquivos.receitafederal.gov.br/public.php')
 SITE_UNIVERSO = os.environ.get('SITE_UNIVERSO', 'https://amelieapp.com.br/cnpj-universo.php')
 FORMATO = 1
-REGRA = 2      # 1 = principal ou secundária no universo · 2 = principal no universo
+REGRA = 3      # 1 = principal ou secundária no universo · 2 = principal no universo · 3 = e sem MEI
 COLUNAS = ['cnpj', 'matriz', 'fantasia', 'cnae', 'inicio', 'logradouro', 'numero', 'complemento', 'bairro', 'cep', 'uf', 'mun',
            'tel1', 'tel2', 'email', 'razao', 'natureza', 'porte', 'capital', 'mei', 'cnaes']
 TMP = 'tmp'; SAIDA = 'saida'
@@ -251,20 +251,27 @@ def main():
             for linha in gerador: g.write(linha); n += 1
         h = hashlib.sha256(open(cam, 'rb').read()).hexdigest()
         return {'arquivo': nome, 'linhas': n, 'bytes': os.path.getsize(cam), 'sha256': h}
+    sem_mei = {}
     for uf in sorted(por_uf):
         def juntar(uf=uf):
             for l in open(os.path.join(TMP, 'parcial-%s.tsv' % uf), encoding='utf-8'):
                 p = l.rstrip('\n').split('\t')
                 bas = p[0][:8]; e = empresas.get(bas, ('', '', '', ''))
+                if REGRA >= 3 and bas in mei:   # regra 3: MEI quase nunca compra de representante — fica fora
+                    sem_mei[uf] = sem_mei.get(uf, 0) + 1
+                    continue
                 yield '\t'.join(p[:15] + list(e) + ['1' if bas in mei else '0', p[15]]) + '\n'
         arquivos[uf] = gravar('estab-%s-%s.tsv.gz' % (uf, gid), juntar())
         os.remove(os.path.join(TMP, 'parcial-%s.tsv' % uf))
-        log('estado %s: %s empresas (antes da regra 2: %s) · %.1f MB' % (uf, format(arquivos[uf]['linhas'], ','), format(antes.get(uf, 0), ','), arquivos[uf]['bytes'] / 1e6), aviso=True)
+        log('estado %s: %s empresas (MEI fora: %s; secundária fora: %s) · %.1f MB' % (uf, format(arquivos[uf]['linhas'], ','), format(sem_mei.get(uf, 0), ','),
+            format(antes.get(uf, 0) - arquivos[uf]['linhas'] - sem_mei.get(uf, 0), ','), arquivos[uf]['bytes'] / 1e6))
     c = gravar('cnaes-%s.tsv.gz' % gid, ('%s\t%s\n' % x for x in cnaes))
     man = {'formato': FORMATO, 'mes': mes, 'id': gid, 'gerado': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-           'universo_md5': umd5, 'universo': cod, 'regra': REGRA, 'antes_regra': sum(antes.values()), 'colunas': COLUNAS, 'linhas_lidas': lidas,
+           'universo_md5': umd5, 'universo': cod, 'regra': REGRA, 'antes_regra': sum(antes.values()), 'mei_fora': sum(sem_mei.values()), 'colunas': COLUNAS, 'linhas_lidas': lidas,
            'total': sum(x['linhas'] for x in arquivos.values()), 'cnaes': c, 'ufs': arquivos, 'teste': bool(a.limite)}
     json.dump(man, open(os.path.join(SAIDA, 'manifesto.json'), 'w'), ensure_ascii=False, indent=1)
+    log('por estado: ' + ' · '.join('%s %s' % (u, format(arquivos[u]['linhas'], ',')) for u in sorted(arquivos)), aviso=True)
+    log('MEI fora: %s · só secundária fora: %s' % (format(sum(sem_mei.values()), ','), format(sum(antes.values()) - man['total'] - sum(sem_mei.values()), ',')), aviso=True)
     log('pronto: %s empresas em %d estados, de %s linhas lidas, em %.0f min' % (format(man['total'], ','), len(arquivos), format(lidas, ','), (time.time() - t0) / 60), aviso=True)
 
 
