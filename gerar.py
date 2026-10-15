@@ -21,6 +21,7 @@ TOKEN = os.environ.get('RECEITA_TOKEN', 'YggdBLfdninEJX9')
 BASE = os.environ.get('RECEITA_URL', 'https://arquivos.receitafederal.gov.br/public.php')
 SITE_UNIVERSO = os.environ.get('SITE_UNIVERSO', 'https://amelieapp.com.br/cnpj-universo.php')
 FORMATO = 1
+REGRA = 2      # 1 = principal ou secundária no universo · 2 = principal no universo
 COLUNAS = ['cnpj', 'matriz', 'fantasia', 'cnae', 'inicio', 'logradouro', 'numero', 'complemento', 'bairro', 'cep', 'uf', 'mun',
            'tel1', 'tel2', 'email', 'razao', 'natureza', 'porte', 'capital', 'mei', 'cnaes']
 TMP = 'tmp'; SAIDA = 'saida'
@@ -148,7 +149,7 @@ def main():
     a = ap.parse_args()
     os.makedirs(TMP, exist_ok=True); os.makedirs(SAIDA, exist_ok=True)
     mes = a.mes or listar()[-1]
-    cod = universo(); umd5 = hashlib.md5('\n'.join(cod).encode()).hexdigest()
+    cod = universo(); umd5 = hashlib.md5(('\n'.join(cod) + '\nregra=%d' % REGRA).encode()).hexdigest()
     if a.so_conferir:
         atual = {}
         try: atual = json.load(open(a.manifesto_atual))
@@ -171,7 +172,7 @@ def main():
     from concurrent.futures import ThreadPoolExecutor
     pool = ThreadPoolExecutor(max_workers=int(os.environ.get('CONEXOES', '4')))
     fila = [(n, pool.submit(baixar_um, mes, n, tam[n])) for n in cn + est + emp + simp]
-    por_uf = {}; basicos = set(); empresas = {}; mei = set(); cnaes = []
+    por_uf = {}; antes = {}; basicos = set(); empresas = {}; mei = set(); cnaes = []
     lidas = 0; t0 = time.time()
     for nome, fut in fila:
         cam = fut.result()
@@ -197,6 +198,11 @@ def main():
                     s = re.sub(r'\D', '', s)
                     if len(s) == 7 and s not in inter and U.tem(s): inter.append(s)
                 if not inter: continue
+                antes[uf] = antes.get(uf, 0) + 1
+                # Regra 2: a atividade PRINCIPAL precisa ser do universo. Só a secundária
+                # (o mercadinho que declarou "comércio de tintas") não basta — trazia 75%
+                # das empresas do Brasil e enchia a lista de quem não compra.
+                if REGRA >= 2 and not (inter and inter[0] == pr): continue
                 cnpj = c[0] + c[1] + c[2]
                 if not re.fullmatch(r'\d{14}', cnpj): continue
                 email = c[27].strip().lower()
@@ -245,10 +251,10 @@ def main():
                 yield '\t'.join(p[:15] + list(e) + ['1' if bas in mei else '0', p[15]]) + '\n'
         arquivos[uf] = gravar('estab-%s-%s.tsv.gz' % (uf, gid), juntar())
         os.remove(os.path.join(TMP, 'parcial-%s.tsv' % uf))
-        log('estado %s: %s empresas (%.1f MB)' % (uf, format(arquivos[uf]['linhas'], ','), arquivos[uf]['bytes'] / 1e6))
+        log('estado %s: %s empresas (antes da regra 2: %s) · %.1f MB' % (uf, format(arquivos[uf]['linhas'], ','), format(antes.get(uf, 0), ','), arquivos[uf]['bytes'] / 1e6), aviso=True)
     c = gravar('cnaes-%s.tsv.gz' % gid, ('%s\t%s\n' % x for x in cnaes))
     man = {'formato': FORMATO, 'mes': mes, 'id': gid, 'gerado': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-           'universo_md5': umd5, 'universo': cod, 'colunas': COLUNAS, 'linhas_lidas': lidas,
+           'universo_md5': umd5, 'universo': cod, 'regra': REGRA, 'antes_regra': sum(antes.values()), 'colunas': COLUNAS, 'linhas_lidas': lidas,
            'total': sum(x['linhas'] for x in arquivos.values()), 'cnaes': c, 'ufs': arquivos, 'teste': bool(a.limite)}
     json.dump(man, open(os.path.join(SAIDA, 'manifesto.json'), 'w'), ensure_ascii=False, indent=1)
     log('pronto: %s empresas em %d estados, de %s linhas lidas, em %.0f min' % (format(man['total'], ','), len(arquivos), format(lidas, ','), (time.time() - t0) / 60), aviso=True)
