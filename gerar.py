@@ -33,6 +33,11 @@ def log(*a, aviso=False):
         print('::notice::' + ' '.join(map(str, a)), flush=True)   # aparece no resumo da execução
 
 
+def erro(msg):
+    if os.environ.get('GITHUB_ACTIONS'): print('::error::' + msg, flush=True)
+    raise SystemExit(msg)
+
+
 def curl(args, tentativas=8):
     for t in range(tentativas):
         r = subprocess.run(['curl', '-sS', '--fail', '-u', TOKEN + ':', '-A', 'AMELIE/1.0 (amelieapp.com.br)'] + args)
@@ -50,9 +55,12 @@ def listar(mes=None):
         if mes is None: return sorted(d for d in os.listdir(LOCAL) if re.fullmatch(r'\d{4}-\d{2}', d))
         return {f: os.path.getsize(os.path.join(LOCAL, mes, f)) for f in os.listdir(os.path.join(LOCAL, mes)) if f.lower().endswith('.zip')}
     url = BASE + '/webdav/' + (mes + '/' if mes else '')
-    out = subprocess.run(['curl', '-sS', '--fail', '-m', '120', '-u', TOKEN + ':', '-X', 'PROPFIND', '-H', 'Depth: 1', url], capture_output=True)
-    if out.returncode != 0:
-        raise SystemExit('Receita não respondeu à listagem: ' + out.stderr.decode()[:200])
+    for t in range(6):   # a Receita às vezes não responde de primeira
+        out = subprocess.run(['curl', '-sS', '--fail', '-m', '120', '-u', TOKEN + ':', '-X', 'PROPFIND', '-H', 'Depth: 1', url], capture_output=True)
+        if out.returncode == 0: break
+        log('  listagem falhou (%s), tentativa %d' % (out.stderr.decode()[:120].strip(), t + 1)); time.sleep(30 * (t + 1))
+    else:
+        erro('Receita não respondeu à listagem: ' + out.stderr.decode()[:200])
     doc = ET.fromstring(out.stdout)
     itens = []
     for r in doc.iter('{DAV:}response'):
@@ -166,7 +174,7 @@ def main():
     simp = [n for n in tam if n.lower().startswith('simples')]
     cn = [n for n in tam if n.lower().startswith('cnae')]
     if len(est) < 10 or len(emp) < 10 or not simp or not cn:
-        raise SystemExit('A pasta %s está incompleta: %s' % (mes, sorted(tam)))
+        erro('A pasta %s está incompleta: %s' % (mes, sorted(tam)))
     log('mês %s · %d atividades no universo · %.1f GB para baixar' % (mes, len(cod), sum(tam[n] for n in est + emp + simp + cn) / 1e9), aviso=True)
 
     from concurrent.futures import ThreadPoolExecutor
@@ -176,7 +184,7 @@ def main():
     lidas = 0; t0 = time.time()
     for nome, fut in fila:
         cam = fut.result()
-        if cam is None: raise SystemExit('Não consegui baixar ' + nome)
+        if cam is None: erro('Não consegui baixar ' + nome)
         b = nome.lower(); n0 = 0
         if b.startswith('cnae'):
             for l in linhas(cam):
