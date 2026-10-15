@@ -1,0 +1,53 @@
+name: Base de CNPJ
+# Todo dia confere se a Receita publicou um mês novo (ou se as atividades mudaram).
+# Só gera quando precisa; quando gera, publica os arquivos por estado como "release".
+on:
+  schedule:
+    - cron: '17 9 * * *'     # 06:17 em Brasília
+  workflow_dispatch:
+    inputs:
+      forcar:
+        description: 'Gerar de novo mesmo sem novidade'
+        type: boolean
+        default: false
+permissions:
+  contents: write
+concurrency:
+  group: base-cnpj
+  cancel-in-progress: false
+jobs:
+  gerar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Precisa gerar?
+        id: conf
+        run: |
+          curl -sSL --fail -o atual.json "https://github.com/$REPO/releases/latest/download/manifesto.json" || echo '{}' > atual.json
+          python3 gerar.py --so-conferir --manifesto-atual atual.json
+      - name: Gerar a base
+        if: steps.conf.outputs.precisa == 'sim' || inputs.forcar
+        run: python3 gerar.py --mes "${{ steps.conf.outputs.mes }}"
+      - name: Publicar
+        if: steps.conf.outputs.precisa == 'sim' || inputs.forcar
+        run: |
+          MES="${{ steps.conf.outputs.mes }}"; TAG="base-$MES"
+          gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" --title "Base de CNPJ $MES" --notes "Empresas ativas por estado, prontas para a AMELIE. Gerado automaticamente a partir dos dados abertos da Receita Federal."
+          # Primeiro os dados, por último o manifesto: o site nunca vê um manifesto apontando para arquivo que ainda não subiu.
+          gh release upload "$TAG" -R "$REPO" --clobber saida/*.tsv.gz
+          gh release upload "$TAG" -R "$REPO" --clobber saida/manifesto.json
+          gh release edit "$TAG" -R "$REPO" --latest
+          # Arquivos de uma geração anterior do mesmo mês
+          ID=$(python3 -c "import json;print(json.load(open('saida/manifesto.json'))['id'])")
+          for a in $(gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name'); do
+            case "$a" in manifesto.json|*"$ID"*) ;; *) gh release delete-asset "$TAG" "$a" -R "$REPO" -y ;; esac
+          done
+          # Guarda só os 3 meses mais recentes
+          for t in $(gh release list -R "$REPO" --limit 50 --json tagName --jq '.[].tagName' | grep '^base-' | sort -r | tail -n +4); do
+            gh release delete "$t" -R "$REPO" -y --cleanup-tag
+          done
+          echo "::notice::publicado $TAG ($ID)"

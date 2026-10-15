@@ -26,8 +26,10 @@ COLUNAS = ['cnpj', 'matriz', 'fantasia', 'cnae', 'inicio', 'logradouro', 'numero
 TMP = 'tmp'; SAIDA = 'saida'
 
 
-def log(*a):
+def log(*a, aviso=False):
     print(time.strftime('%H:%M:%S'), *a, flush=True)
+    if aviso and os.environ.get('GITHUB_ACTIONS'):
+        print('::notice::' + ' '.join(map(str, a)), flush=True)   # aparece no resumo da execução
 
 
 def curl(args, tentativas=8):
@@ -39,7 +41,13 @@ def curl(args, tentativas=8):
     return False
 
 
+LOCAL = os.environ.get('RECEITA_LOCAL', '')   # pasta com <mes>/<arquivo>.zip, só para teste
+
+
 def listar(mes=None):
+    if LOCAL:
+        if mes is None: return sorted(d for d in os.listdir(LOCAL) if re.fullmatch(r'\d{4}-\d{2}', d))
+        return {f: os.path.getsize(os.path.join(LOCAL, mes, f)) for f in os.listdir(os.path.join(LOCAL, mes)) if f.lower().endswith('.zip')}
     url = BASE + '/webdav/' + (mes + '/' if mes else '')
     out = subprocess.run(['curl', '-sS', '--fail', '-m', '120', '-u', TOKEN + ':', '-X', 'PROPFIND', '-H', 'Depth: 1', url], capture_output=True)
     if out.returncode != 0:
@@ -80,15 +88,16 @@ class Universo:
         return any(c[:n] in s for n, s in self.pref.items())
 
 
-def baixador(mes, arquivos, tamanhos, q):
-    """Baixa em ordem, no máximo 2 arquivos à frente do processamento."""
-    for nome in arquivos:
-        dest = os.path.join(TMP, nome)
-        ok = curl(['-m', '7200', '-C', '-', '--retry', '5', '-o', dest, '%s/dav/files/%s/%s/%s' % (BASE, TOKEN, mes, nome)])
-        if ok and tamanhos.get(nome) and os.path.getsize(dest) != tamanhos[nome]:
-            ok = curl(['-m', '7200', '-C', '-', '-o', dest, '%s/dav/files/%s/%s/%s' % (BASE, TOKEN, mes, nome)])
-        q.put((nome, dest if ok else None))
-    q.put((None, None))
+def baixar_um(mes, nome, tamanho):
+    """A Receita entrega ~0,7 MB/s por conexão: baixamos 4 arquivos ao mesmo tempo."""
+    dest = os.path.join(TMP, nome)
+    if LOCAL:
+        import shutil; shutil.copy(os.path.join(LOCAL, mes, nome), dest); return dest
+    for _ in range(3):
+        if curl(['-m', '14400', '-C', '-', '--retry', '5', '-o', dest, '%s/dav/files/%s/%s/%s' % (BASE, TOKEN, mes, nome)]) \
+                and (not tamanho or os.path.getsize(dest) == tamanho):
+            return dest
+    return None
 
 
 def linhas(zip_caminho, limite=0):
@@ -145,7 +154,7 @@ def main():
         try: atual = json.load(open(a.manifesto_atual))
         except Exception: pass
         precisa = not (atual.get('mes') == mes and atual.get('universo_md5') == umd5 and atual.get('formato') == FORMATO)
-        log('mês publicado na Receita: %s · base atual: %s · precisa gerar: %s' % (mes, atual.get('mes'), precisa))
+        log('mês publicado na Receita: %s · base atual: %s · precisa gerar: %s' % (mes, atual.get('mes'), precisa), aviso=True)
         with open(os.environ.get('GITHUB_OUTPUT', '/dev/null'), 'a') as o:
             o.write('precisa=%s\nmes=%s\n' % ('sim' if precisa else 'nao', mes))
         return
@@ -157,15 +166,15 @@ def main():
     cn = [n for n in tam if n.lower().startswith('cnae')]
     if len(est) < 10 or len(emp) < 10 or not simp or not cn:
         raise SystemExit('A pasta %s está incompleta: %s' % (mes, sorted(tam)))
-    log('mês %s · %d atividades no universo · %.1f GB para baixar' % (mes, len(cod), sum(tam[n] for n in est + emp + simp + cn) / 1e9))
+    log('mês %s · %d atividades no universo · %.1f GB para baixar' % (mes, len(cod), sum(tam[n] for n in est + emp + simp + cn) / 1e9), aviso=True)
 
-    q = queue.Queue(maxsize=2)
-    th = threading.Thread(target=baixador, args=(mes, cn + est + emp + simp, tam, q), daemon=True); th.start()
+    from concurrent.futures import ThreadPoolExecutor
+    pool = ThreadPoolExecutor(max_workers=int(os.environ.get('CONEXOES', '4')))
+    fila = [(n, pool.submit(baixar_um, mes, n, tam[n])) for n in cn + est + emp + simp]
     por_uf = {}; basicos = set(); empresas = {}; mei = set(); cnaes = []
     lidas = 0; t0 = time.time()
-    while True:
-        nome, cam = q.get()
-        if nome is None: break
+    for nome, fut in fila:
+        cam = fut.result()
         if cam is None: raise SystemExit('Não consegui baixar ' + nome)
         b = nome.lower(); n0 = 0
         if b.startswith('cnae'):
@@ -242,7 +251,7 @@ def main():
            'universo_md5': umd5, 'universo': cod, 'colunas': COLUNAS, 'linhas_lidas': lidas,
            'total': sum(x['linhas'] for x in arquivos.values()), 'cnaes': c, 'ufs': arquivos, 'teste': bool(a.limite)}
     json.dump(man, open(os.path.join(SAIDA, 'manifesto.json'), 'w'), ensure_ascii=False, indent=1)
-    log('pronto: %s empresas em %d estados' % (format(man['total'], ','), len(arquivos)))
+    log('pronto: %s empresas em %d estados, de %s linhas lidas, em %.0f min' % (format(man['total'], ','), len(arquivos), format(lidas, ','), (time.time() - t0) / 60), aviso=True)
 
 
 if __name__ == '__main__':
