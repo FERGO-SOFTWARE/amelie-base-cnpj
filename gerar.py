@@ -13,7 +13,10 @@ Saída (pasta saida/):
   cnaes-<id>.tsv.gz       código e descrição oficial das atividades
   reps-<id>.tsv.gz        representantes comerciais (atividade principal 461x) ATIVOS por cidade:
                           uf, município (código da Receita), total, individuais, empresas — o mapa
-                          de oportunidades da AMELIE (só contagem, nenhum dado de empresa)
+                          de oportunidades da AMELIE
+  repsd-<UF>-<id>.tsv.gz  os mesmos representantes, um por linha (dados públicos do CNPJ: nome,
+                          cidade, telefone e e-mail cadastrados), para a prospecção do time
+                          comercial — colunas em COLUNAS_REPS
   manifesto.json          mês, id, universo de atividades e a lista de arquivos (com sha256)
 
 Uso: python3 gerar.py [--mes AAAA-MM] [--limite N] (limite = linhas por arquivo, só para teste)
@@ -25,9 +28,10 @@ BASE = os.environ.get('RECEITA_URL', 'https://arquivos.receitafederal.gov.br/pub
 SITE_UNIVERSO = os.environ.get('SITE_UNIVERSO', 'https://amelieapp.com.br/cnpj-universo.php')
 FORMATO = 1
 REGRA = 3      # 1 = principal ou secundária no universo · 2 = principal no universo · 3 = e sem MEI
-REPS = 1       # 1 = publica também a contagem de representantes (461x) por cidade
+REPS = 2       # 1 = contagem de representantes (461x) por cidade · 2 = e um arquivo por estado com cada um (prospecção)
 # Natureza jurídica de quem trabalha sozinho: empresário individual, EIRELI (as antigas) e MEI (pelo Simples).
 NAT_INDIVIDUAL = {'2135', '2305', '2313', '4014'}
+COLUNAS_REPS = ['cnpj', 'matriz', 'fantasia', 'razao', 'individual', 'porte', 'inicio', 'uf', 'mun', 'bairro', 'tel1', 'tel2', 'email', 'cnae']
 COLUNAS = ['cnpj', 'matriz', 'fantasia', 'cnae', 'inicio', 'logradouro', 'numero', 'complemento', 'bairro', 'cep', 'uf', 'mun',
            'tel1', 'tel2', 'email', 'razao', 'natureza', 'porte', 'capital', 'mei', 'cnaes']
 TMP = 'tmp'; SAIDA = 'saida'
@@ -189,7 +193,7 @@ def main():
     por_uf = {}; antes = {}; basicos = set(); empresas = {}; mei = set(); cnaes = []
     # Representantes (461x): cada estabelecimento ativo vai para um arquivo temporário (uf, município, CNPJ básico);
     # a natureza jurídica e o MEI chegam depois, nos arquivos de Empresas e do Simples.
-    reps_tmp = open(os.path.join(TMP, 'reps.tsv'), 'w', encoding='ascii') if REPS else None
+    reps_tmp = open(os.path.join(TMP, 'reps.tsv'), 'w', encoding='utf-8') if REPS else None
     reps_bas = set(); reps_nat = {}; reps_mei = set()
     lidas = 0; t0 = time.time()
     for nome, fut in fila:
@@ -210,8 +214,12 @@ def main():
                 uf = c[19].upper()
                 if not re.fullmatch(r'[A-Z]{2}', uf) or uf == 'EX': continue
                 pr = re.sub(r'\D', '', c[11])
-                if reps_tmp and pr[:3] == '461' and re.fullmatch(r'\d{8}', c[0]):
-                    reps_tmp.write('%s\t%d\t%s\n' % (uf, int(c[20] or 0) if c[20].isdigit() else 0, c[0])); reps_bas.add(c[0])
+                if reps_tmp and pr[:3] == '461' and re.fullmatch(r'\d{8}', c[0]) and re.fullmatch(r'\d{14}', c[0] + c[1] + c[2]):
+                    em = c[27].strip().lower()
+                    reps_tmp.write('\t'.join([uf, str(int(c[20]) if c[20].isdigit() else 0), c[0], c[0] + c[1] + c[2], '1' if c[3] == '1' else '0',
+                                              limpo(c[4]), data(c[10]), limpo(c[17]), tel(c[21], c[22]), tel(c[23], c[24]),
+                                              em if EMAIL.match(em) and len(em) <= 120 else '', pr]) + '\n')
+                    reps_bas.add(c[0])
                 inter = []
                 if U.tem(pr): inter.append(pr)
                 for s in c[12].split(','):
@@ -239,7 +247,7 @@ def main():
                 bs = l[1:9].decode('ascii', 'replace')
                 if bs in reps_bas:
                     c = campos(l)
-                    if len(c) >= 3: reps_nat[bs] = c[2]
+                    if len(c) >= 6: reps_nat[bs] = (c[2], limpo(razao_limpa(c[1])), str(int(c[5])) if c[5].isdigit() and int(c[5]) else '')
                 if bs not in basicos: continue
                 c = campos(l)
                 if len(c) < 6: continue
@@ -288,13 +296,22 @@ def main():
     reps = None; reps_total = 0
     if reps_tmp:
         reps_tmp.close()
-        cont = {}
-        for l in open(os.path.join(TMP, 'reps.tsv'), encoding='ascii'):
-            uf, mun, bs = l.rstrip('\n').split('\t')
-            ind = bs in reps_mei or reps_nat.get(bs, '') in NAT_INDIVIDUAL
+        cont = {}; det = {}
+        for l in open(os.path.join(TMP, 'reps.tsv'), encoding='utf-8'):
+            uf, mun, bs, cnpj, matriz, fant, ini, bairro, t1, t2, em, cnae = l.rstrip('\n').split('\t')
+            nat, razao, porte = reps_nat.get(bs, ('', '', ''))
+            ind = bs in reps_mei or nat in NAT_INDIVIDUAL
             k = (uf, int(mun)); t = cont.setdefault(k, [0, 0, 0])
             t[0] += 1; t[1 if ind else 2] += 1
+            f = det.get(uf)
+            if f is None: f = det[uf] = open(os.path.join(TMP, 'repsd-%s.tsv' % uf), 'w', encoding='utf-8')
+            f.write('\t'.join([cnpj, matriz, fant, razao, '1' if ind else '0', porte, ini, uf, mun, bairro, t1, t2, em, cnae]) + '\n')
         os.remove(os.path.join(TMP, 'reps.tsv'))
+        for f in det.values(): f.close()
+        reps_ufs = {}
+        for uf in sorted(det):
+            reps_ufs[uf] = gravar('repsd-%s-%s.tsv.gz' % (uf, gid), open(os.path.join(TMP, 'repsd-%s.tsv' % uf), encoding='utf-8'))
+            os.remove(os.path.join(TMP, 'repsd-%s.tsv' % uf))
         reps_total = sum(t[0] for t in cont.values())
         reps = gravar('reps-%s.tsv.gz' % gid, ('%s\t%d\t%d\t%d\t%d\n' % (k[0], k[1], t[0], t[1], t[2]) for k, t in sorted(cont.items())))
         log('representantes (461x): %s em %s cidades · individuais %s · empresas %s' % (format(reps_total, ','), format(len(cont), ','),
@@ -302,7 +319,7 @@ def main():
     man = {'formato': FORMATO, 'mes': mes, 'id': gid, 'gerado': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
            'universo_md5': umd5, 'universo': cod, 'regra': REGRA, 'antes_regra': sum(antes.values()), 'mei_fora': sum(sem_mei.values()), 'colunas': COLUNAS, 'linhas_lidas': lidas,
            'total': sum(x['linhas'] for x in arquivos.values()), 'cnaes': c, 'ufs': arquivos, 'teste': bool(a.limite)}
-    if reps: man['reps'] = reps; man['reps_total'] = reps_total
+    if reps: man['reps'] = reps; man['reps_total'] = reps_total; man['reps_ufs'] = reps_ufs; man['colunas_reps'] = COLUNAS_REPS
     json.dump(man, open(os.path.join(SAIDA, 'manifesto.json'), 'w'), ensure_ascii=False, indent=1)
     log('por estado: ' + ' · '.join('%s %s' % (u, format(arquivos[u]['linhas'], ',')) for u in sorted(arquivos)), aviso=True)
     log('MEI fora: %s · só secundária fora: %s' % (format(sum(sem_mei.values()), ','), format(sum(antes.values()) - man['total'] - sum(sem_mei.values()), ',')), aviso=True)
