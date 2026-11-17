@@ -93,6 +93,6 @@ def fechar(man, ufs, cn, completo):
         with open(cam, 'wb') as f: f.write(b''.join(regs))
         cns[pfx] = {'a': nome, 'n': len(regs), 'bytes': os.path.getsize(cam), 'h': hashlib.sha1(open(cam, 'rb').read()).hexdigest()[:12]}
     m = {'formato': FORMATO, 'mes': man['mes'], 'id': man['id'], 'gerado': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'colunas': COLUNAS, 'reg': REG,
-         'total': sum(x['total'] for x in ufs.values()), 'ufs': ufs, 'cn': cns}
+         'total': sum(x['total'] for x in ufs.values()), 'ufs': ufs, 'cn': cns, 'universo': man.get('universo')}
     json.dump(m, open(os.path.join(BASE, 'base.json'), 'w'), ensure_ascii=False, separators=(',', ':'), sort_keys=True)
     return m
