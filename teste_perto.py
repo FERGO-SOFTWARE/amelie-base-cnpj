@@ -163,6 +163,73 @@ class Geracao(unittest.TestCase):
         r, idx, l = self.gerar()
         self.assertEqual(l['11111111000101']['prec'], 'n')
 
+    # ---- a base em arquivos (o que Clientes novos lê no lugar do banco)
+    def base(self, extra=()):
+        import base_arq
+        if extra:
+            with gzip.open('saida/estab-SP-abc123.tsv.gz', 'at', encoding='utf-8') as f: f.writelines(extra)
+        cn = {}; os.makedirs('perto', exist_ok=True)
+        r = perto.fazer_uf('SP', self.optout, '2026-11-17', 'cnefe', cn)
+        idx = json.load(open('base/base-SP.json'))
+        linhas = {}
+        for k, a in idx['arquivos'].items():
+            for l in gzip.open('base/' + a['a'], 'rt', encoding='utf-8'):
+                p = l.rstrip('\n').split('\t'); linhas.setdefault(k, {})[p[0]] = dict(zip(base_arq.COLUNAS, p))
+        return r, idx, linhas, cn
+
+    def test_base_tem_tudo_que_a_busca_usa(self):
+        r, idx, l, cn = self.base()
+        e = l['d47']['11111111000101']
+        self.assertEqual((e['fantasia'], e['razao'], e['tel1'], e['email'], e['mun'], e['matriz'], e['porte'], e['capital'], e['natureza']),
+                         ('MERCADO AURORA', 'EMPRESA FICTICIA LTDA', '11999990000', 'x@exemplo.test', '7107', '1', '1', '1000', '2062'))
+        self.assertEqual((e['lat'], e['lng'], e['prec'], e['logradouro'], e['numero']), ('-23.55010', '-46.63310', 'n', 'R. DR. JOÃO PESSÔA', '120'))
+        # a empresa que o mapa não acha (só a cidade) entra na base, sem coordenada: a busca usa o centro da cidade
+        self.assertEqual((l['d47']['11111111000606']['lat'], l['d47']['11111111000606']['prec']), ('', 'm'))
+        self.assertEqual((l['d47']['11111111000505']['lat'], l['d47']['11111111000505']['prec']), ('', 'm'))
+        self.assertNotIn('11111111000707', l['d47']); self.assertNotIn('11111111000909', l['d47'])      # MEI e quem pediu para sair
+        self.assertEqual((r['base']['total'], idx['total'], idx['grupos']), (7, 7, {'471': 'd47'}))
+
+    def test_base_secundaria_entra_no_arquivo_do_outro_ramo(self):
+        ex = estab('11111111001010', 'TINTAS E MERCADO', '2021-01-01', 'RUA A', '5', '01001000')[:-1] + '4712100,4741500,4744099\n'
+        r, idx, l, cn = self.base([ex])
+        self.assertEqual(idx['grupos'], {'471': 'd47', '474': 'd47'})
+        self.assertEqual(l['d47']['11111111001010']['sec'], '4741500,4744099')
+        ex2 = estab('11111111001111', 'OFICINA', '2021-01-01', 'RUA A', '5', '01001000', cnae='4520001')[:-1] + '4520001,4530703\n'
+        r, idx, l, cn = self.base([ex2])
+        self.assertEqual(sorted(idx['arquivos']), ['d45', 'd47'])
+        self.assertIn('11111111001111', l['d45']); self.assertNotIn('11111111001111', l['d47'])
+
+    def test_base_divisao_grande_separa_por_grupo(self):
+        import base_arq
+        antes = base_arq.DIVISAO_MAX; base_arq.DIVISAO_MAX = 3
+        try:
+            ex = estab('11111111001010', 'TINTAS', '2021-01-01', 'RUA A', '5', '01001000', cnae='4741500')[:-1] + '4741500,4712100\n'
+            r, idx, l, cn = self.base([ex])
+        finally: base_arq.DIVISAO_MAX = antes
+        self.assertEqual(idx['grupos'], {'471': 'g471', '474': 'g474'})
+        self.assertIn('11111111001010', l['g471']); self.assertIn('11111111001010', l['g474'])           # principal num, secundária no outro
+        self.assertEqual(len(l['g474']), 1)
+
+    def test_base_arquivo_igual_tem_o_mesmo_hash(self):
+        import hashlib
+        r, idx, l, cn = self.base()
+        a = idx['arquivos']['d47']; b = open('base/' + a['a'], 'rb').read()
+        self.assertEqual((hashlib.sha1(b).hexdigest()[:12], len(b), a['n']), (a['h'], a['bytes'], 7))
+        r2, idx2, l2, cn2 = self.base()
+        self.assertEqual(idx2['arquivos']['d47']['h'], a['h'])                                           # gerar de novo não muda o arquivo: não sobe outra vez
+
+    def test_cnpj_em_ordem_para_a_busca_binaria(self):
+        import base_arq
+        r, idx, l, cn = self.base()
+        m = base_arq.fechar({'mes': '2026-11', 'id': 'abc123'}, {'SP': r['base']}, cn, True)
+        self.assertEqual((m['total'], m['reg'], sorted(m['cn']), m['cn']['11']['n']), (7, 16, ['11'], 7))
+        b = open('base/cn-11.bin', 'rb').read()
+        regs = [b[i:i + 16] for i in range(0, len(b), 16)]
+        self.assertEqual(regs, sorted(regs)); self.assertEqual(len(b), 7 * 16)
+        self.assertEqual((int.from_bytes(regs[0][:8], 'big'), regs[0][8], int.from_bytes(regs[0][9:12], 'big'), int.from_bytes(regs[0][12:14], 'big'), regs[0][14]),
+                         (11111111000101, 35, 4712100, 7107, 1))
+        self.assertIsNone(base_arq.fechar({'mes': '2026-11', 'id': 'abc123'}, {'SP': r['base']}, cn, False))   # teste de alguns estados não troca o geral
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=1)
