@@ -1,0 +1,82 @@
+name: Perto de você
+# Pega a base do mês (release base-AAAA-MM), põe coordenada em cada empresa com os endereços do IBGE (CNEFE)
+# e publica em pedaços pequenos do mapa, um release por estado (perto-UF). O sistema da AMELIE lê só os pedaços
+# da região onde o representante está. Roda sozinho quando a base do mês termina.
+on:
+  workflow_run:
+    workflows: ['Base de CNPJ']
+    types: [completed]
+  schedule:
+    - cron: '47 13 * * *'    # 10:47 em Brasília: pega o que a base do dia tiver deixado
+  workflow_dispatch:
+    inputs:
+      forcar:
+        description: 'Gerar de novo mesmo sem base nova'
+        type: boolean
+        default: false
+      ufs:
+        description: 'Só estes estados (ex.: SP,MG). Vazio = todos'
+        type: string
+        default: ''
+permissions:
+  contents: write
+concurrency:
+  group: perto
+  cancel-in-progress: false
+jobs:
+  perto:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Testes
+        run: python3 teste_perto.py
+      - name: Precisa gerar?
+        id: conf
+        run: |
+          curl -sSL --fail -o base.json "https://github.com/$REPO/releases/latest/download/manifesto.json" || echo '{}' > base.json
+          curl -sSL --fail -o atual.json "https://github.com/$REPO/releases/download/perto/perto.json" || echo '{}' > atual.json
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          b = json.load(open('base.json')); a = json.load(open('atual.json'))
+          import perto
+          tem = bool(b.get('id')) and not b.get('teste')
+          precisa = tem and not (a.get('id') == b.get('id') and a.get('formato') == perto.FORMATO)
+          print('precisa=' + ('sim' if precisa else 'nao')); print('mes=' + str(b.get('mes', '')))
+          PY
+          cat "$GITHUB_OUTPUT"
+      - name: Baixar a base do mês
+        if: steps.conf.outputs.precisa == 'sim' || (inputs.forcar && steps.conf.outputs.mes != '')
+        run: |
+          mkdir -p saida
+          gh release download "base-${{ steps.conf.outputs.mes }}" -R "$REPO" -D saida -p 'estab-*.tsv.gz' -p manifesto.json
+          ls -la saida | head -40
+      - name: Localizar e dividir
+        if: steps.conf.outputs.precisa == 'sim' || (inputs.forcar && steps.conf.outputs.mes != '')
+        run: python3 perto.py --ufs "${{ inputs.ufs }}"
+      - name: Publicar
+        if: steps.conf.outputs.precisa == 'sim' || (inputs.forcar && steps.conf.outputs.mes != '')
+        run: |
+          MES="${{ steps.conf.outputs.mes }}"
+          for IDX in perto/indice-*.json; do
+            UF=$(basename "$IDX" .json); UF=${UF#indice-}; TAG="perto-$UF"
+            gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" --latest=false --title "Perto de você · $UF" --notes "Empresas de $UF com coordenada, em pedaços do mapa. Gerado automaticamente (Receita Federal + CNEFE/IBGE). Sem telefone e sem e-mail."
+            # Primeiro os pedaços, por último o índice: o sistema nunca vê um índice apontando para pedaço que ainda não subiu.
+            ls perto/$UF-*.tsv perto/novos-$UF.tsv | xargs -n 40 gh release upload "$TAG" -R "$REPO" --clobber
+            gh release upload "$TAG" -R "$REPO" --clobber "$IDX"
+            # Pedaços que não existem mais nesta geração
+            python3 -c "import json,sys;d=json.load(open('$IDX'));print('\n'.join([f['a'] for f in d['folhas']]+[d['novos']['a'],'indice-$UF.json']))" > fica.txt
+            for a in $(gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name'); do
+              grep -qxF "$a" fica.txt || gh release delete-asset "$TAG" "$a" -R "$REPO" -y
+            done
+            echo "::notice::publicado $TAG ($(wc -l < fica.txt) arquivos)"
+          done
+          # O manifesto geral só sobe quando todos os estados subiram. Geração de alguns estados (ufs=...) não troca o geral.
+          if [ -z "${{ inputs.ufs }}" ]; then
+            gh release view perto -R "$REPO" >/dev/null 2>&1 || gh release create perto -R "$REPO" --latest=false --title "Perto de você" --notes "Manifesto dos pedaços por estado (perto-UF)."
+            gh release upload perto -R "$REPO" --clobber perto/perto.json
+            echo "::notice::perto.json publicado ($MES)"
+          fi
