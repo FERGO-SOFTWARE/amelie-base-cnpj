@@ -25,6 +25,7 @@ Sem telefone e sem e-mail: contato sai do sistema, para o assinante, quando ele 
 
 Uso: python3 perto.py [--ufs SP,MG] [--cnefe pasta_com_os_zip] [--hoje AAAA-MM-DD]
 """
+import base_arq
 import argparse, csv, glob, gzip, hashlib, io, json, math, os, re, subprocess, sys, time, unicodedata, urllib.request, zipfile
 
 SAIDA = 'saida'; PERTO = 'perto'; TMP = 'tmp'
@@ -130,7 +131,7 @@ def ler_estabs(uf, optout, hoje):
         cep = re.sub(r'\D', '', p[9])
         out.append({'cnpj': cnpj, 'nome': nome[:80], 'cnae': p[3], 'inicio': p[4], 'log': p[5][:70], 'num': p[6][:10], 'bairro': p[8][:40],
                     'cep': cep if len(cep) == 8 else '', 'mun': p[11], 'porte': p[17],
-                    'k2': '', 'k1': ''})
+                    'k2': '', 'k1': '', 'x': base_arq.extras(p)})
     for e in out:
         if not e['cep']: continue
         rn = rua_norm(e['log'])
@@ -295,7 +296,7 @@ def dividir(es, sul, oeste, lado, caminho, folhas, uf):
         dividir(q[i], sul + (m if i >= 2 else 0), oeste + (m if i % 2 else 0), m, caminho + str(i), folhas, uf)
 
 
-def fazer_uf(uf, optout, hoje, pasta_cnefe):
+def fazer_uf(uf, optout, hoje, pasta_cnefe, cn=None):
     es = ler_estabs(uf, optout, hoje)
     if not es: return None
     cam = cnefe_zip(uf, pasta_cnefe)
@@ -326,10 +327,11 @@ def fazer_uf(uf, optout, hoje, pasta_cnefe):
     idx = {'formato': FORMATO, 'uf': uf, 'colunas': COLUNAS, 'total': len(es), 'perto': len(perto), 'precisao': cont, 'folhas': folhas, 'novos': fn}
     json.dump(idx, open(os.path.join(PERTO, 'indice-%s.json' % uf), 'w'), ensure_ascii=False, separators=(',', ':'))
     pct = lambda k: 100.0 * cont[k] / max(1, len(es))
+    base = base_arq.fazer_uf(uf, es, COD_UF[uf], cn if cn is not None else {})
     log('%s: %s empresas · no número %.0f%% · perto do número %.0f%% · na rua %.0f%% · no CEP %.0f%% · só a cidade %.0f%% · %d pedaços · %s novas · CNEFE %s linhas (%s usadas) · %.0f s'
         % (uf, format(len(es), ','), pct('n'), pct('p'), pct('r'), pct('c'), pct('m'), len(folhas), format(len(novos), ','), format(lidas, ','), format(usadas, ','), time.time() - t0), aviso=True)
     return {'indice': 'indice-%s.json' % uf, 'h': hashlib.sha1(open(os.path.join(PERTO, 'indice-%s.json' % uf), 'rb').read()).hexdigest()[:12],
-            'caixa': caixa, 'total': len(es), 'perto': len(perto), 'pedacos': len(folhas), 'novos': len(novos), 'precisao': cont}
+            'caixa': caixa, 'total': len(es), 'perto': len(perto), 'pedacos': len(folhas), 'novos': len(novos), 'precisao': cont, 'base': base}
 
 
 def main():
@@ -340,10 +342,10 @@ def main():
     hoje = a.hoje or time.strftime('%Y-%m-%d', time.gmtime())
     ufs = [u for u in (a.ufs.split(',') if a.ufs else sorted(man['ufs'])) if u in COD_UF]
     optout = set() if a.cnefe else optout_do_site()
-    out = {}
+    out = {}; cn = {}; bases = {}
     for uf in ufs:
-        r = fazer_uf(uf, optout, hoje, a.cnefe)
-        if r: out[uf] = r
+        r = fazer_uf(uf, optout, hoje, a.cnefe, cn)
+        if r: bases[uf] = r.pop('base'); out[uf] = r
     if not out: erro('Nenhum estado gerado.')
     tot = sum(x['total'] for x in out.values()); per = sum(x['perto'] for x in out.values())
     json.dump({'formato': FORMATO, 'mes': man['mes'], 'id': man['id'], 'gerado': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'hoje': hoje, 'colunas': COLUNAS,
@@ -351,6 +353,8 @@ def main():
               open(os.path.join(PERTO, 'perto.json'), 'w'), ensure_ascii=False, separators=(',', ':'))
     log('perto: %s empresas, %s com endereço no mapa (%.0f%%), %d pedaços em %d estados'
         % (format(tot, ','), format(per, ','), 100.0 * per / max(1, tot), sum(x['pedacos'] for x in out.values()), len(out)), aviso=True)
+    b = base_arq.fechar(man, bases, cn, not a.ufs)
+    if b: log('base em arquivos: %s empresas em %d arquivos de %d estados' % (format(b['total'], ','), sum(x['arquivos'] for x in bases.values()), len(bases)), aviso=True)
     if per < tot * 0.5: erro('Menos da metade das empresas ficou com endereço no mapa (%d de %d): o CNEFE mudou de formato? Nada é publicado.' % (per, tot))
 
 

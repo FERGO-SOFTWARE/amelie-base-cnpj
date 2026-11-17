@@ -30,3 +30,7 @@ Colunas: `cnpj, nome, cnae, inicio, lat, lng, prec, logradouro, numero, bairro, 
 Sem telefone e sem e-mail. MEI fica fora. Quem pediu para não ser contatado fica fora.
 
 Testes (dados inventados): `python3 teste_perto.py`.
+
+## Base em arquivos (`base_arq.py`)
+
+No mesmo workflow, as mesmas empresas saem também **separadas por atividade**, com tudo o que a tela Clientes novos usa (razão social, telefone, e-mail, atividades secundárias, porte, capital e a coordenada): um release por estado (`arq-UF`) e o release `arq` com o manifesto (`base.json`) e o índice de CNPJ (`cn-NN.bin`, 16 bytes por empresa, em ordem). O sistema baixa só os arquivos do ramo de quem procura; com isso as tabelas grandes de CNPJ não precisam ficar no banco. Sem MEI e sem quem pediu para não ser contatado.

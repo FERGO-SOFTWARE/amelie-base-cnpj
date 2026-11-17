@@ -39,12 +39,14 @@ jobs:
         run: |
           curl -sSL --fail -o base.json "https://github.com/$REPO/releases/latest/download/manifesto.json" || echo '{}' > base.json
           curl -sSL --fail -o atual.json "https://github.com/$REPO/releases/download/perto/perto.json" || echo '{}' > atual.json
+          curl -sSL --fail -o arq.json "https://github.com/$REPO/releases/download/arq/base.json" || echo '{}' > arq.json
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           b = json.load(open('base.json')); a = json.load(open('atual.json'))
-          import perto
+          import perto, base_arq
+          q = json.load(open('arq.json'))
           tem = bool(b.get('id')) and not b.get('teste')
-          precisa = tem and not (a.get('id') == b.get('id') and a.get('formato') == perto.FORMATO)
+          precisa = tem and not (a.get('id') == b.get('id') and a.get('formato') == perto.FORMATO and q.get('id') == b.get('id') and q.get('formato') == base_arq.FORMATO)
           print('precisa=' + ('sim' if precisa else 'nao')); print('mes=' + str(b.get('mes', '')))
           PY
           cat "$GITHUB_OUTPUT"
@@ -60,3 +62,6 @@ jobs:
       - name: Publicar
         if: steps.conf.outputs.precisa == 'sim' || (inputs.forcar && steps.conf.outputs.mes != '')
         run: bash publicar_perto.sh "${{ steps.conf.outputs.mes }}" "${{ inputs.ufs }}"
+      - name: Publicar a base em arquivos (Clientes novos)
+        if: steps.conf.outputs.precisa == 'sim' || (inputs.forcar && steps.conf.outputs.mes != '')
+        run: bash publicar_base.sh "${{ steps.conf.outputs.mes }}" "${{ inputs.ufs }}"
