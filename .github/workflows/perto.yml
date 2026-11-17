@@ -26,7 +26,7 @@ concurrency:
 jobs:
   perto:
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    timeout-minutes: 340
     env:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
@@ -59,24 +59,4 @@ jobs:
         run: python3 perto.py --ufs "${{ inputs.ufs }}"
       - name: Publicar
         if: steps.conf.outputs.precisa == 'sim' || (inputs.forcar && steps.conf.outputs.mes != '')
-        run: |
-          MES="${{ steps.conf.outputs.mes }}"
-          for IDX in perto/indice-*.json; do
-            UF=$(basename "$IDX" .json); UF=${UF#indice-}; TAG="perto-$UF"
-            gh release view "$TAG" -R "$REPO" >/dev/null 2>&1 || gh release create "$TAG" -R "$REPO" --latest=false --title "Perto de você · $UF" --notes "Empresas de $UF com coordenada, em pedaços do mapa. Gerado automaticamente (Receita Federal + CNEFE/IBGE). Sem telefone e sem e-mail."
-            # Primeiro os pedaços, por último o índice: o sistema nunca vê um índice apontando para pedaço que ainda não subiu.
-            ls perto/$UF-*.tsv perto/novos-$UF.tsv | xargs -n 40 gh release upload "$TAG" -R "$REPO" --clobber
-            gh release upload "$TAG" -R "$REPO" --clobber "$IDX"
-            # Pedaços que não existem mais nesta geração
-            python3 -c "import json,sys;d=json.load(open('$IDX'));print('\n'.join([f['a'] for f in d['folhas']]+[d['novos']['a'],'indice-$UF.json']))" > fica.txt
-            for a in $(gh release view "$TAG" -R "$REPO" --json assets --jq '.assets[].name'); do
-              grep -qxF "$a" fica.txt || gh release delete-asset "$TAG" "$a" -R "$REPO" -y
-            done
-            echo "::notice::publicado $TAG ($(wc -l < fica.txt) arquivos)"
-          done
-          # O manifesto geral só sobe quando todos os estados subiram. Geração de alguns estados (ufs=...) não troca o geral.
-          if [ -z "${{ inputs.ufs }}" ]; then
-            gh release view perto -R "$REPO" >/dev/null 2>&1 || gh release create perto -R "$REPO" --latest=false --title "Perto de você" --notes "Manifesto dos pedaços por estado (perto-UF)."
-            gh release upload perto -R "$REPO" --clobber perto/perto.json
-            echo "::notice::perto.json publicado ($MES)"
-          fi
+        run: bash publicar_perto.sh "${{ steps.conf.outputs.mes }}" "${{ inputs.ufs }}"
