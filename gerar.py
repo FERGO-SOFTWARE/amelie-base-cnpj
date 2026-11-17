@@ -112,11 +112,31 @@ def baixar_um(mes, nome, tamanho):
     dest = os.path.join(TMP, nome)
     if LOCAL:
         import shutil; shutil.copy(os.path.join(LOCAL, mes, nome), dest); return dest
-    for _ in range(3):
-        if curl(['-m', '14400', '-C', '-', '--retry', '5', '-o', dest, '%s/dav/files/%s/%s/%s' % (BASE, TOKEN, mes, nome)]) \
-                and (not tamanho or os.path.getsize(dest) == tamanho):
-            return dest
+    url = '%s/dav/files/%s/%s/%s' % (BASE, TOKEN, mes, nome)
+    # 16/11/2026: o mês novo ainda estava sendo publicado e o arquivo veio com tamanho diferente do da lista. As três
+    # tentativas "continuavam" o mesmo arquivo e nunca fechavam. Agora: tamanho diferente, confere o tamanho de agora no
+    # servidor; se ainda não bate (ou não é um zip inteiro), apaga, espera e baixa de novo do zero.
+    for t in range(5):
+        ok = curl(['-m', '14400', '-C', '-', '--retry', '5', '-o', dest, url])
+        tem = os.path.getsize(dest) if os.path.exists(dest) else 0
+        if ok and tem > 0 and zipfile.is_zipfile(dest):
+            if not tamanho or tem == tamanho: return dest
+            agora = tamanho_no_servidor(url)
+            if agora and tem == agora:
+                log('  %s: a lista dizia %s bytes, o servidor agora diz %s; o arquivo está inteiro' % (nome, format(tamanho, ','), format(agora, ',')))
+                return dest
+        log('  %s: veio com %s bytes (esperado %s)%s; apago e baixo de novo (tentativa %d de 5)'
+            % (nome, format(tem, ','), format(tamanho or 0, ','), '' if ok else ', com erro do curl', t + 1))
+        if os.path.exists(dest): os.remove(dest)
+        time.sleep(60 * (t + 1))
     return None
+
+
+def tamanho_no_servidor(url):
+    """O tamanho que o servidor informa agora (0 se não informar)."""
+    r = subprocess.run(['curl', '-sSI', '--fail', '-L', '-m', '120', '-u', TOKEN + ':', '-A', 'AMELIE/1.0 (amelieapp.com.br)', url], capture_output=True, text=True)
+    m = re.findall(r'(?im)^content-length:\s*(\d+)', r.stdout or '')
+    return int(m[-1]) if m else 0
 
 
 def linhas(zip_caminho, limite=0):
@@ -198,7 +218,7 @@ def main():
     lidas = 0; t0 = time.time()
     for nome, fut in fila:
         cam = fut.result()
-        if cam is None: erro('Não consegui baixar ' + nome)
+        if cam is None: erro('Não consegui baixar ' + nome + ' inteiro. A Receita pode estar no meio da publicação do mês: a base atual continua valendo e amanhã tenta de novo sozinho.')
         b = nome.lower(); n0 = 0
         if b.startswith('cnae'):
             for l in linhas(cam):
