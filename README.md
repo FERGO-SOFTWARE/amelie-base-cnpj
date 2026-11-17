@@ -17,3 +17,16 @@ Roda sozinho todo dia às 06:17 (Brasília) e só gera quando há mês novo ou m
 Para forçar: Actions › Base de CNPJ › Run workflow.
 
 Só dado público de CNPJ (Lei de Acesso à Informação).
+
+## Perto de você (`perto.py`)
+
+Depois que a base do mês sai, o workflow **Perto de você** põe coordenada em cada empresa (endereços do CNEFE 2022, do IBGE) e publica em pedaços pequenos do mapa:
+
+- um release por estado, `perto-UF`: `UF-<quadrado>.tsv` (até ~8 mil empresas cada), `novos-UF.tsv` (abertas nos últimos 200 dias) e `indice-UF.json`;
+- o release `perto`, com o `perto.json` (mês, colunas e onde está o índice de cada estado).
+
+Colunas: `cnpj, nome, cnae, inicio, lat, lng, prec, logradouro, numero, bairro, cep, ibge, porte`. `prec` diz o quanto a coordenada é exata: `n` no número, `p` perto do número, `r` na rua, `c` no CEP, `m` só a cidade (fica fora dos pedaços).
+
+Sem telefone e sem e-mail. MEI fica fora. Quem pediu para não ser contatado fica fora.
+
+Testes (dados inventados): `python3 teste_perto.py`.
